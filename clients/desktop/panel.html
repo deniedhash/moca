@@ -465,17 +465,16 @@
     // --- Complexity check (mirrors server/agent.py) ---
     const SIMPLE_PATTERNS = [
       "what time", "reminder", "set a", "what's my",
-      "who am i", "what do you know", "hello", "hi",
+      "who am i", "what do you know",
       "thanks", "thank you", "close", "open",
       "how are you", "what are you",
     ];
 
     function isSimpleTask(text) {
-      const lower = text.toLowerCase();
-      return (
-        SIMPLE_PATTERNS.some((p) => lower.includes(p)) ||
-        text.split(/\s+/).length <= 5
-      );
+      const lower = text.toLowerCase().trim();
+      const wordCount = text.split(/\s+/).length;
+      if (wordCount <= 5) return true;
+      return SIMPLE_PATTERNS.some((p) => lower.includes(p));
     }
 
     // --- Status dot ---

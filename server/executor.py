@@ -4,9 +4,11 @@ Sandboxed Python execution, web search, integration registry.
 All execution capability lives here — the model is purely a reasoning layer.
 """
 
+import base64
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -105,6 +107,7 @@ class CodeExecutor:
 
     def __init__(self):
         self._ensure_registry()
+        self.cleanup_old_displays()
 
     def _ensure_registry(self):
         """Create registry.json if it doesn't exist."""
@@ -187,12 +190,44 @@ class CodeExecutor:
 
         # Extract images from output (IMAGE: prefix)
         images = []
+        image_files = []
         clean_output_lines = []
         for line in result["output"].split("\n"):
             if line.startswith("IMAGE:"):
-                images.append(line[6:].strip())
+                img_b64 = line[6:].strip()
+                images.append(img_b64)
+                # Save as file so we can serve via HTTP instead of SSE base64
+                try:
+                    img_filename = f"chart_{task_id}_{int(time.time())}.png"
+                    img_filepath = os.path.join(WORKSPACE, img_filename)
+                    with open(img_filepath, "wb") as img_f:
+                        img_f.write(base64.b64decode(img_b64))
+                    image_files.append(img_filename)
+                    executor_logger.info(
+                        f"IMAGE_SAVED | task_id={task_id} | file={img_filename}"
+                    )
+                except Exception as img_err:
+                    executor_logger.warning(
+                        f"IMAGE_SAVE_FAILED | task_id={task_id} | error={str(img_err)}"
+                    )
+            elif line.startswith("IMAGE_FILE:"):
+                # Model saved file directly (e.g. plt.savefig)
+                fname = line[11:].strip()
+                fpath = os.path.join(WORKSPACE, fname)
+                if os.path.exists(fpath) and fname not in image_files:
+                    image_files.append(fname)
+                    executor_logger.info(
+                        f"IMAGE_FILE_FOUND | task_id={task_id} | file={fname}"
+                    )
             else:
                 clean_output_lines.append(line)
+
+        # Also check for .png files created directly by the code
+        for f in files_created:
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".svg")):
+                fname = os.path.basename(f)
+                if fname not in image_files:
+                    image_files.append(fname)
 
         final_result = {
             "success": result["success"],
@@ -200,6 +235,7 @@ class CodeExecutor:
             "error": result["error"],
             "files_created": files_created,
             "images": images,
+            "image_files": image_files,
             "execution_time": result["execution_time"],
             "memory_mb": result.get("memory_mb", 0),
             "reversible": rev["reversible"],
@@ -383,30 +419,105 @@ class CodeExecutor:
             return False
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Display File Management
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def save_display_file(self, html_content: str, filename: str = None) -> str:
+        """Save HTML display content to workspace, return filename."""
+        if not filename:
+            filename = f"display_{int(time.time())}.html"
+        filepath = os.path.join(WORKSPACE, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        executor_logger.info(
+            f"DISPLAY_SAVED | file={filename} | size={len(html_content)} bytes"
+        )
+        return filename
+
+    def cleanup_old_displays(self, max_age_hours: int = 24):
+        """Delete display files older than max_age_hours."""
+        cutoff = time.time() - (max_age_hours * 3600)
+        count = 0
+        try:
+            for f in os.listdir(WORKSPACE):
+                if f.startswith("display_") and f.endswith(".html"):
+                    fpath = os.path.join(WORKSPACE, f)
+                    if os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                        count += 1
+        except Exception as e:
+            executor_logger.warning(f"DISPLAY_CLEANUP_ERROR | error={str(e)}")
+        if count:
+            executor_logger.info(f"DISPLAY_CLEANUP | removed={count} old files")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Web Search
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def web_search(self, query: str, num_results: int = 5) -> list:
+    # Image file extensions for URL detection
+    _IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+    _USER_AGENTS = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ]
+
+    _last_search_time = 0  # Class-level rate limit tracker
+
+    def _resolve_wikimedia_image(self, page_url: str) -> str | None:
+        """Resolve a commons.wikimedia.org/wiki/File: page to direct image URL."""
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+
+            resp = requests.get(
+                page_url,
+                headers={"User-Agent": random.choice(self._USER_AGENTS)},
+                timeout=5,
+            )
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Full resolution link
+            full_img = soup.find("div", class_="fullImageLink")
+            if full_img:
+                a = full_img.find("a")
+                if a and a.get("href"):
+                    href = a["href"]
+                    return ("https:" + href) if href.startswith("//") else href
+
+            # Fallback — any upload.wikimedia.org link
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if "upload.wikimedia.org" in href:
+                    return ("https:" + href) if href.startswith("//") else href
+        except Exception as e:
+            executor_logger.debug(f"WIKIMEDIA_RESOLVE_FAILED | url={page_url} | error={e}")
+        return None
+
+    def web_search(self, query: str, num_results: int = 5) -> dict:
         """
         Search the web using DuckDuckGo HTML (no API key).
-        Returns list of {title, url, snippet}.
+        Returns {"results": [{title, url, snippet}], "image_urls": [str]}.
         """
         try:
             import requests
             from bs4 import BeautifulSoup
         except ImportError:
             executor_logger.error("WEB_SEARCH | Missing requests or bs4")
-            return []
+            return {"results": [], "image_urls": []}
+
+        # Rate limit — 2s between searches to avoid DuckDuckGo blocking
+        now = time.time()
+        elapsed = now - CodeExecutor._last_search_time
+        if elapsed < 2:
+            time.sleep(2 - elapsed)
+        CodeExecutor._last_search_time = time.time()
 
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://duckduckgo.com/html/?q={encoded_query}"
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        }
+        headers = {"User-Agent": random.choice(self._USER_AGENTS)}
 
         executor_logger.info(f"WEB_SEARCH | query={query}")
 
@@ -415,7 +526,7 @@ class CodeExecutor:
             response.raise_for_status()
         except Exception as e:
             executor_logger.error(f"WEB_SEARCH_FAILED | query={query} | error={str(e)}")
-            return []
+            return {"results": [], "image_urls": []}
 
         try:
             soup = BeautifulSoup(response.text, "lxml")
@@ -423,6 +534,8 @@ class CodeExecutor:
             soup = BeautifulSoup(response.text, "html.parser")
 
         results = []
+        image_urls = []
+
         for result_div in soup.select(".result"):
             if len(results) >= num_results:
                 break
@@ -450,11 +563,53 @@ class CodeExecutor:
                     "snippet": snippet,
                 })
 
+                # Extract direct image URLs
+                href_lower = href.lower()
+                if any(href_lower.endswith(ext) for ext in self._IMAGE_EXTENSIONS):
+                    image_urls.append(href)
+                elif "upload.wikimedia.org" in href_lower:
+                    image_urls.append(href)
+                elif "commons.wikimedia.org/wiki/File:" in href:
+                    # Resolve to actual image URL
+                    resolved = self._resolve_wikimedia_image(href)
+                    if resolved:
+                        image_urls.append(resolved)
+                        executor_logger.info(
+                            f"WIKIMEDIA_RESOLVED | page={href} | image={resolved}"
+                        )
+
+            # Scan all links in result for image URLs
+            for link in result_div.select("a[href]"):
+                link_href = link.get("href", "")
+                if "uddg=" in link_href:
+                    try:
+                        parsed = urllib.parse.parse_qs(
+                            urllib.parse.urlparse(link_href).query
+                        )
+                        link_href = parsed.get("uddg", [link_href])[0]
+                    except Exception:
+                        pass
+                link_lower = link_href.lower()
+                if any(link_lower.endswith(ext) for ext in self._IMAGE_EXTENSIONS):
+                    if link_href not in image_urls:
+                        image_urls.append(link_href)
+                elif "upload.wikimedia.org" in link_lower and link_href not in image_urls:
+                    image_urls.append(link_href)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_images = []
+        for img_url in image_urls:
+            if img_url not in seen:
+                seen.add(img_url)
+                unique_images.append(img_url)
+
         executor_logger.info(
-            f"WEB_SEARCH_RESULTS | query={query} | count={len(results)}"
+            f"WEB_SEARCH_RESULTS | query={query} | "
+            f"results={len(results)} | image_urls={len(unique_images)}"
         )
 
-        return results
+        return {"results": results, "image_urls": unique_images}
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Integration Registry

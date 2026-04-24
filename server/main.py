@@ -9,12 +9,13 @@ import psutil
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
 
 from agent import MOCAAgent, is_simple_task
-from executor import CodeExecutor
+from executor import CodeExecutor, WORKSPACE
 from memory import MOCAMemory
 
 # Load .env from project root (one directory above server/)
@@ -79,6 +80,8 @@ Always respond with this JSON structure. The display and action fields should be
 When responding to messages from device mac_panel, keep responses concise — they will be read as text not heard as speech. Still include display field when visual content would help."""
 
 app = FastAPI(title="MOCA Brain Server")
+os.makedirs(WORKSPACE, exist_ok=True)
+app.mount("/files", StaticFiles(directory=WORKSPACE), name="files")
 moca_memory = MOCAMemory()
 executor = CodeExecutor()
 agent = MOCAAgent(client, AI_MODEL, moca_memory, USER_ID)
@@ -107,11 +110,151 @@ def trim_history():
         conversation_history = conversation_history[-MAX_HISTORY:]
 
 
+def extract_json(text: str) -> dict:
+    """Robust JSON extraction from model output.
+    Handles think tags, markdown wrappers, and truncated JSON.
+    Preserves all fields including display."""
+    if not text:
+        return {"reply": "I'm on it Boss."}
+
+    text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+    text = re.sub(r'<think>[\s\S]*$', '', text).strip()
+    text = re.sub(r'<reasoning>[\s\S]*?</reasoning>', '', text).strip()
+    text = re.sub(r'<reasoning>[\s\S]*$', '', text).strip()
+    text = re.sub(r'^```json\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+    text = text.strip()
+
+    if not text:
+        return {"reply": "I'm on it Boss."}
+
+    # Attempt 1: direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Attempt 2: find outermost balanced braces
+    start = text.find('{')
+    if start == -1:
+        return {"reply": text}
+
+    depth = 0
+    for i, char in enumerate(text[start:], start):
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i+1])
+                except (json.JSONDecodeError, TypeError):
+                    break
+
+    return {"reply": text}
+
+
 def clean_response(text: str) -> str:
     if not text:
         return "I'm on it Boss."
     cleaned = re.sub(r"\[\d+\]", "", text).strip()
     return cleaned if cleaned else "I'm on it Boss."
+
+
+def strip_model_wrapper(text: str) -> str:
+    """Strip <think>...</think> reasoning blocks and ```json wrappers
+    from model output so only the actual response content remains."""
+    if not text:
+        return text
+    # Remove closed <think>...</think> blocks (handles multiline)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    # Remove UNCLOSED <think> blocks (model ran out of tokens during reasoning)
+    text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL).strip()
+    # Same for <reasoning> tags some models use
+    text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL).strip()
+    text = re.sub(r'<reasoning>.*$', '', text, flags=re.DOTALL).strip()
+    # Remove markdown json code fences
+    text = re.sub(r'^```json\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+    return text.strip()
+
+
+def sanitize_result(result: dict) -> dict:
+    """Final safety net: ensure result['reply'] is always a clean string,
+    never a JSON blob. Extract display from nested JSON if present.
+    Uses regex fallback for malformed/truncated model JSON."""
+    reply = result.get("reply", "")
+    if not isinstance(reply, str) or not reply.strip().startswith("{"):
+        # Also check if it has thinking tags wrapping JSON
+        if isinstance(reply, str) and ('<think>' in reply or '```json' in reply):
+            reply = strip_model_wrapper(reply)
+            result["reply"] = reply
+            if not reply.strip().startswith("{"):
+                return result
+        else:
+            return result
+
+    # Attempt 1: proper JSON parse
+    try:
+        parsed = json.loads(reply)
+        if isinstance(parsed, dict) and "reply" in parsed:
+            result["reply"] = clean_response(parsed["reply"])
+            if parsed.get("display") and not result.get("display"):
+                display = parsed["display"]
+                if isinstance(display, dict) and display.get("url"):
+                    pass  # URL format — keep as-is
+                elif isinstance(display, str):
+                    display = {"layout": "single", "windows": [{"type": "html", "title": "Display", "content": display}]}
+                elif isinstance(display, dict) and "windows" not in display and "url" not in display:
+                    content = display.get("content", "")
+                    if content:
+                        display = {"layout": "single", "windows": [{"type": "html", "title": display.get("title", "Display"), "content": content}]}
+                    else:
+                        display = None
+                result["display"] = display
+            if parsed.get("action") and not result.get("action"):
+                result["action"] = parsed["action"]
+            log("SANITIZE", "Extracted nested JSON from reply field")
+            return result
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Attempt 2: Regex extraction for malformed/truncated JSON
+    log("SANITIZE", "json.loads failed — trying regex extraction")
+    
+    # Extract reply text
+    reply_match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', reply)
+    extracted_reply = reply_match.group(1) if reply_match else ""
+    if extracted_reply:
+        extracted_reply = extracted_reply.encode('utf-8').decode('unicode_escape')
+        result["reply"] = clean_response(extracted_reply)
+        log("SANITIZE", f"Regex extracted reply: {extracted_reply[:80]}")
+    else:
+        # If even regex fails, don't show raw JSON to user
+        result["reply"] = "I've got the information, Boss, but the formatting got a bit garbled."
+
+    # Extract display if possible
+    if not result.get("display"):
+        title_match = re.search(r'"title"\s*:\s*"([^"]+)"', reply)
+        content_match = re.search(r'"content"\s*:\s*"(<div.*?)(?:"]|"})', reply, flags=re.DOTALL)
+        
+        if content_match:
+            title = title_match.group(1) if title_match else "Display"
+            # Unescape the extracted HTML content
+            content = content_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+            # Try to forcefully close unclosed divs
+            open_divs = content.count("<div")
+            close_divs = content.count("</div>")
+            if open_divs > close_divs:
+                content += "</div>" * (open_divs - close_divs)
+                
+            result["display"] = {
+                "layout": "single",
+                "windows": [{"type": "html", "title": title, "content": content}]
+            }
+            log("SANITIZE", f"Regex extracted display: title={title}")
+
+    return result
 
 
 class ChatRequest(BaseModel):
@@ -151,30 +294,34 @@ def direct_response(req: ChatRequest) -> dict:
         # Handle compound model responses — content can be None
         raw_content = response.choices[0].message.content or ""
 
-        # Parse structured JSON response
-        display = None
-        action = None
-        reply = ""
+        # Parse structured JSON response using robust extractor
+        parsed = extract_json(raw_content)
+        reply = clean_response(parsed.get("reply", ""))
+        display = parsed.get("display")
+        action = parsed.get("action")
 
-        try:
-            parsed = json.loads(raw_content)
-            reply = clean_response(parsed.get("reply", ""))
-            display = parsed.get("display")
-            action = parsed.get("action")
+        # Handle double-nesting: model puts full JSON as the reply value
+        if reply and reply.strip().startswith("{"):
+            try:
+                nested = json.loads(reply)
+                if isinstance(nested, dict) and "reply" in nested:
+                    reply = clean_response(nested["reply"])
+                    if nested.get("display") and not display:
+                        display = nested["display"]
+                    if nested.get("action") and not action:
+                        action = nested["action"]
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-            # Normalize display — if model returned flat HTML string, wrap it
-            if isinstance(display, str):
-                display = {"layout": "single", "windows": [{"type": "html", "title": "Display", "content": display}]}
-            elif isinstance(display, dict) and "windows" not in display:
-                # Model returned display dict without windows array — wrap content
-                content = display.get("content", "")
-                if content:
-                    display = {"layout": "single", "windows": [{"type": "html", "title": display.get("title", "Display"), "content": content}]}
-                else:
-                    display = None
-        except (json.JSONDecodeError, TypeError):
-            # Model returned plain text — use as reply
-            reply = clean_response(raw_content)
+        # Normalize display — if model returned flat HTML string, wrap it
+        if isinstance(display, str):
+            display = {"layout": "single", "windows": [{"type": "html", "title": "Display", "content": display}]}
+        elif isinstance(display, dict) and "windows" not in display:
+            content = display.get("content", "")
+            if content:
+                display = {"layout": "single", "windows": [{"type": "html", "title": display.get("title", "Display"), "content": content}]}
+            else:
+                display = None
 
         conversation_history.append({"role": "assistant", "content": reply})
         trim_history()
@@ -211,7 +358,7 @@ def direct_response(req: ChatRequest) -> dict:
             result["display"] = display
         if action:
             result["action"] = action
-        return result
+        return sanitize_result(result)
 
     except Exception as e:
         log("ERROR", f"AI provider failed: {e}")
@@ -239,7 +386,7 @@ async def chat(req: ChatRequest):
             conversation_history.append({"role": "assistant", "content": result.get("reply", "")})
             trim_history()
             log("AGENT", f"Completed in {result.get('steps_taken', 0)} steps, {result.get('total_time', 0)}s")
-            return result
+            return sanitize_result(result)
 
     # Simple task — direct response
     return direct_response(req)
@@ -301,6 +448,7 @@ async def chat_stream(req: ChatRequest):
         conversation_history.append({"role": "assistant", "content": result.get("reply", "")})
         trim_history()
 
+        result = sanitize_result(result)
         yield f"data: {json.dumps({'type': 'complete', **result})}\n\n"
 
     return StreamingResponse(
@@ -325,6 +473,25 @@ async def health():
         "ram": ram,
         "conversation_length": len(conversation_history),
     }
+
+
+@app.get("/image/{filename}")
+async def get_image(filename: str):
+    """Serve generated images from workspace."""
+    # Security: only allow image files, no path traversal
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return {"error": "invalid filename"}
+    filepath = os.path.join(WORKSPACE, filename)
+    if not os.path.exists(filepath):
+        return {"error": "not found"}
+    # Detect media type
+    if filename.endswith(".svg"):
+        media = "image/svg+xml"
+    elif filename.endswith(".jpg") or filename.endswith(".jpeg"):
+        media = "image/jpeg"
+    else:
+        media = "image/png"
+    return FileResponse(filepath, media_type=media)
 
 
 @app.get("/memory")

@@ -7,17 +7,25 @@ const http = require("http");
 // --- Complexity patterns (mirrors server/agent.py) ---
 const SIMPLE_PATTERNS = [
   "what time", "reminder", "set a", "what's my",
-  "who am i", "what do you know", "hello", "hi",
+  "who am i", "what do you know",
   "thanks", "thank you", "close", "open",
   "how are you", "what are you",
 ];
 
+// Greetings only count as simple if the message is SHORT
+const GREETING_PATTERNS = ["hello", "hi", "hey"];
+
 function isSimpleTask(text) {
-  const lower = text.toLowerCase();
-  return (
-    SIMPLE_PATTERNS.some((p) => lower.includes(p)) ||
-    text.split(/\s+/).length <= 5
-  );
+  const lower = text.toLowerCase().trim();
+  const wordCount = text.split(/\s+/).length;
+
+  // Short messages are always simple
+  if (wordCount <= 5) {
+    return true;
+  }
+
+  // Longer messages — only simple if they match a non-greeting pattern
+  return SIMPLE_PATTERNS.some((p) => lower.includes(p));
 }
 
 // Use venv python so listener/speaker have their dependencies
@@ -47,62 +55,123 @@ let overlayWindow = null;
 const displayWindows = new Map(); // title -> BrowserWindow
 
 function createDisplayWindow(windowSpec, bounds) {
-  const preloadPath = path.join(__dirname, "preload.js");
-
   const win = new BrowserWindow({
     width: bounds.width,
     height: bounds.height,
     x: bounds.x,
     y: bounds.y,
     frame: false,
-    titleBarStyle: "hidden",
-    transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
-    focusable: false,
+    focusable: true,
     resizable: true,
     movable: true,
     hasShadow: true,
     webPreferences: {
-      preload: preloadPath,
-      contextIsolation: true,
       nodeIntegration: false,
+      contextIsolation: true,
     },
   });
 
   // Show on all macOS Spaces
   win.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true, visibleOnFullScreen: true });
 
-  // Store content for this window so preload can fetch it
-  win._mocaContent = {
-    title: windowSpec.title || "",
-    content: windowSpec.content || "",
-  };
-
-  win._mocaTitle = windowSpec.title || "";
-  displayWindows.set(win._mocaTitle, win);
+  const title = windowSpec.title || "MOCA";
+  win._mocaTitle = title;
+  displayWindows.set(title, win);
 
   win.on("closed", () => {
-    displayWindows.delete(win._mocaTitle);
+    displayWindows.delete(title);
+    log("DISPLAY", `User closed: ${title}`);
   });
 
-  // Make focusable when user clicks
-  win.on("focus", () => {
-    win.setFocusable(true);
-  });
+  // Build full HTML and load directly via data URL
+  const fullHtml = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d0d14;
+    color: #e0e0e0;
+    font-family: system-ui, -apple-system, sans-serif;
+    height: 100vh;
+    overflow: auto;
+  }
+  .title-bar {
+    padding: 10px 16px;
+    color: #00d4ff;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    opacity: 0.6;
+    -webkit-app-region: drag;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .content {
+    padding: 16px;
+    padding-bottom: 60px;
+  }
+  .close-btn {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    transition: background 0.2s;
+    -webkit-app-region: no-drag;
+    z-index: 1000;
+  }
+  .close-btn:hover {
+    background: rgba(255,255,255,0.2);
+  }
+  img {
+    max-width: 100%;
+    border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+  <div class="title-bar">${title.replace(/</g, '&lt;')}</div>
+  <div class="content">
+    ${windowSpec.content || ''}
+  </div>
+  <button class="close-btn" onclick="window.close()">\u00d7</button>
+</body>
+</html>`;
 
-  win.on("blur", () => {
-    win.setFocusable(false);
-  });
+  win.loadURL(
+    'data:text/html;charset=utf-8,' + encodeURIComponent(fullHtml)
+  );
 
-  win.loadFile("display.html");
-  log("DISPLAY", `Opened: ${win._mocaTitle}`);
+  win.show();
+  log("DISPLAY", `Opened: ${title}`);
 }
 
 function showDisplay(display) {
+  if (!display) return;
+
   // Close existing display windows first
   closeAllDisplayWindows();
 
+  // New format: display.url → load URL directly
+  if (display.url) {
+    createDisplayWindowWithURL(display.url, "MOCA");
+    return;
+  }
+
+  // Old format: display.windows array
   const layout = display.layout || "single";
   const windows = display.windows || [];
 
@@ -116,8 +185,53 @@ function showDisplay(display) {
   const positions = computeLayout(layout, windows, maxWidth, screenH, workX, workY);
 
   for (let i = 0; i < windows.length; i++) {
-    createDisplayWindow(windows[i], positions[i]);
+    if (windows[i].url) {
+      createDisplayWindowWithURL(windows[i].url, windows[i].title || "MOCA");
+    } else {
+      createDisplayWindow(windows[i], positions[i]);
+    }
   }
+}
+
+function createDisplayWindowWithURL(url, title) {
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+  const { x: workX, y: workY } = screen.getPrimaryDisplay().workArea;
+
+  const winW = Math.min(900, sw - 40);
+  const winH = Math.min(600, sh - 40);
+
+  const win = new BrowserWindow({
+    width: winW,
+    height: winH,
+    x: workX + Math.round((sw - winW) / 2),
+    y: workY + Math.round((sh - winH) / 2),
+    frame: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    resizable: true,
+    movable: true,
+    hasShadow: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  // Show on all macOS Spaces
+  win.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true, visibleOnFullScreen: true });
+
+  win._mocaTitle = title;
+  displayWindows.set(title, win);
+
+  win.on("closed", () => {
+    displayWindows.delete(title);
+    log("DISPLAY", `User closed: ${title}`);
+  });
+
+  win.loadURL(url);
+  win.show();
+  log("DISPLAY", `Opened URL: ${url}`);
 }
 
 function computeLayout(layout, windows, screenW, screenH, workX, workY) {
@@ -233,21 +347,6 @@ function closeDisplayByTitle(title) {
     log("DISPLAY", `Closed: ${title}`);
   }
 }
-
-// IPC handlers for display windows
-ipcMain.on("display-close", (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (win) {
-    const title = win._mocaTitle;
-    if (!win.isDestroyed()) win.close();
-    log("DISPLAY", `User closed: ${title}`);
-  }
-});
-
-ipcMain.handle("display-get-content", (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  return win ? win._mocaContent : null;
-});
 
 // --- Panel window ---
 
@@ -539,6 +638,25 @@ ipcMain.handle("panel-chat-stream", async (_event, message) => {
     );
 
     if (response) {
+      // Parse nested JSON reply if model double-encoded it
+      if (response.reply && typeof response.reply === "string" && response.reply.trim().startsWith("{")) {
+        try {
+          const nested = JSON.parse(response.reply);
+          if (nested && typeof nested === "object" && nested.reply) {
+            response.reply = nested.reply;
+            if (nested.display && !response.display) {
+              response.display = nested.display;
+            }
+          }
+        } catch (e) { /* not JSON */ }
+      }
+      if (response.reply && typeof response.reply === "object") {
+        if (response.reply.display && !response.display) {
+          response.display = response.reply.display;
+        }
+        response.reply = response.reply.reply || "Done Boss.";
+      }
+
       if (response.display && response.display.windows) {
         showDisplay(response.display);
       }
@@ -653,6 +771,13 @@ function httpStreamRequest(urlStr, body, onStep) {
             if (payload.type === "step" && onStep) {
               onStep(payload);
             } else if (payload.type === "complete") {
+              // ISSUE 1 FIX: extract reply field if it's nested as an object
+              if (payload.reply && typeof payload.reply === "object") {
+                if (payload.reply.display && !payload.display) {
+                  payload.display = payload.reply.display;
+                }
+                payload.reply = payload.reply.reply || "Done Boss.";
+              }
               resolve(payload);
             }
           } catch (e) {
@@ -667,6 +792,12 @@ function httpStreamRequest(urlStr, body, onStep) {
           try {
             const payload = JSON.parse(buffer.trim().slice(6));
             if (payload.type === "complete") {
+              if (payload.reply && typeof payload.reply === "object") {
+                if (payload.reply.display && !payload.display) {
+                  payload.display = payload.reply.display;
+                }
+                payload.reply = payload.reply.reply || "Done Boss.";
+              }
               resolve(payload);
               return;
             }
@@ -915,6 +1046,29 @@ async function handleUtterance(text) {
       );
 
       if (response) {
+        // FIX 1: If reply is a JSON string, parse it to extract actual reply + display
+        if (response.reply && typeof response.reply === "string" && response.reply.trim().startsWith("{")) {
+          try {
+            const nested = JSON.parse(response.reply);
+            if (nested && typeof nested === "object" && nested.reply) {
+              response.reply = nested.reply;
+              if (nested.display && !response.display) {
+                response.display = nested.display;
+              }
+              log("STREAM", "Parsed nested JSON reply");
+            }
+          } catch (e) {
+            // Not JSON — use as-is
+          }
+        }
+        // Also handle reply being an object (previous fix)
+        if (response.reply && typeof response.reply === "object") {
+          if (response.reply.display && !response.display) {
+            response.display = response.reply.display;
+          }
+          response.reply = response.reply.reply || "Done Boss.";
+        }
+
         // Handle display
         if (response.display && response.display.windows) {
           showDisplay(response.display);
@@ -954,6 +1108,20 @@ async function handleUtterance(text) {
     });
 
     if (response) {
+      // Parse JSON reply if the server returned a JSON string as reply
+      if (response.reply && typeof response.reply === "string" && response.reply.trim().startsWith("{")) {
+        try {
+          const nested = JSON.parse(response.reply);
+          if (nested && typeof nested === "object" && nested.reply) {
+            response.reply = nested.reply;
+            if (nested.display && !response.display) {
+              response.display = nested.display;
+            }
+            log("CHAT", "Parsed nested JSON reply");
+          }
+        } catch (e) { /* not JSON */ }
+      }
+
       // Handle display payload
       if (response.display && response.display.windows) {
         // Auto-open panel when display arrives via voice

@@ -1,6 +1,9 @@
 {
-  "server": "http://141.148.199.180:8080",
-  "wake_words": ["moca", "mo"],
+  "server": "http://localhost:8000",
+  "wake_words": [
+    "moca",
+    "mo"
+  ],
   "tts": {
     "engine": "piper",
     "model": "models/en_US-amy-medium.onnx",

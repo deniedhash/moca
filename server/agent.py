@@ -7,6 +7,7 @@ The model is purely a reasoning layer. All execution lives in executor.py.
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -23,6 +24,8 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MOCA_ROOT = os.getenv("MOCA_ROOT", _PROJECT_ROOT)
 LOGS_DIR = os.path.join(MOCA_ROOT, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8000")
 
 agent_logger = logging.getLogger("moca.agent")
 agent_logger.setLevel(logging.DEBUG)
@@ -61,6 +64,50 @@ def is_simple_task(task: str) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Task Completion Validation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+VISUAL_KEYWORDS = [
+    "show", "display", "chart", "graph",
+    "image", "picture", "photo", "visualize",
+]
+
+INCOMPLETE_SIGNALS = [
+    "you can find", "visit", "check out",
+    "available at", "go to", "here are some sources",
+]
+
+
+def is_task_complete(task: str, response: dict) -> tuple[bool, str | None]:
+    """Validate that a response actually completes the requested task."""
+    task_lower = task.lower()
+
+    # Check 1: Visual intent requires display field (url or windows format)
+    visual_intent = any(w in task_lower for w in VISUAL_KEYWORDS)
+    display = response.get("display")
+    has_display = display and (display.get("url") or display.get("windows"))
+    if visual_intent and not has_display:
+        return False, (
+            "Your response does not include a display window. "
+            "The user asked to SEE something. Complete the task by "
+            "including actual content in a display field. "
+            "For images: find real image URLs and embed them in HTML "
+            "img tags. Do not describe where to find them — show them directly."
+        )
+
+    # Check 2: Response describes where to find content instead of showing it
+    reply = response.get("reply", "").lower()
+    if any(s in reply for s in INCOMPLETE_SIGNALS):
+        return False, (
+            "Response describes where to find content instead of showing it. "
+            "Complete the task by actually fetching/showing the content directly. "
+            "Do not tell the user where to go — do it for them."
+        )
+
+    return True, None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Agent Instructions
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -75,19 +122,52 @@ Respond ONLY in this exact JSON format — nothing else. DO NOT use native tool 
   "command_payload": "python code, search query, or final answer",
   "narration": "one sentence describing this step for Boss",
   "is_final": true or false,
+  "display_file": null or "<!DOCTYPE html>...",
   "save_integration": null or {"name": "...", "description": "...", "parameters": ["..."]}
 }
 
 Rules:
+- If moca_command is duckduckgo_search: command_payload is the search query string. Use this for ALL web searches.
 - If moca_command is execute_python: write complete runnable Python.
   Print results explicitly — output is how you see results.
-  To return an image: print('IMAGE:' + base64_string)
+  To save a chart or image: use matplotlib plt.savefig('chart.png') then print('IMAGE_FILE:chart.png')
   To return structured data: print('JSON:' + json_string)
-- If moca_command is duckduckgo_search: command_payload is the search query string.
+  When your code generates a chart image, reference it as /files/FILENAME.png in display_file HTML.
 - If moca_command is respond and is_final is true: the task is complete. command_payload is your final answer to Boss.
 - If code solves a reusable problem: set save_integration with name, description, and parameters list.
 - Always check available tools before writing new code — you may already have one.
 - For irreversible actions (deleting, sending, posting, paying): tell Boss what you are about to do first. One sentence. Then wait for confirmation.
+
+CRITICAL — web search vs Python:
+You already have a working duckduckgo_search tool. USE IT. Do NOT write Python code to scrape websites or call search engines directly — sites block automated requests and it will always fail.
+
+For finding images:
+  moca_command: "duckduckgo_search"
+  command_payload: "Qutub Minar high resolution photo"
+Search results include an image_urls field with direct .jpg/.png URLs you can use immediately in img tags. Prefer upload.wikimedia.org URLs — always publicly accessible and high quality. Do NOT use Unsplash, Getty, Shutterstock or any service requiring an API key.
+
+Only use execute_python for:
+- Data processing and calculations
+- Chart generation with matplotlib
+- File manipulation
+- API calls where you have a valid API key
+
+NEVER write Python code using requests, urllib, BeautifulSoup, or selenium to scrape Google, Bing, DuckDuckGo, or any website for search results or images. Use duckduckgo_search instead.
+
+Visual display — display_file:
+When the user asks to SEE something (show, display, chart, graph, image, picture, photo, visualize), you MUST include a display_file field with a COMPLETE self-contained HTML webpage. Not a div snippet — a full <!DOCTYPE html> page with head and body.
+
+display_file rules:
+- All CSS in <style> tags in the head. Inline CSS also fine.
+- Dark theme: background #0d0d14, cards #16161f, accent #00d4ff, text #e0e0e0
+- For images: use real URLs you found via duckduckgo_search in <img> tags. NEVER use placeholder URLs.
+- For charts: generate with matplotlib, save PNG to workspace, reference as /files/chart_xxx.png
+- Can include JavaScript for interactivity and real-time updates
+- Can embed YouTube, maps, live data via JavaScript
+- Make it visually impressive — this is a full webpage with complete browser capability
+
+Set display_file to null when no visual output is needed.
+Do NOT describe where to find images or data — actually fetch and show them directly.
 """
 
 
@@ -144,11 +224,18 @@ class MOCAAgent:
         self.model = model
         self.memory = memory
         self.user_id = user_id
-        self.max_steps = 10
         self.executor = CodeExecutor()
+        self.max_steps = 10
+        self.last_images = []  # Track base64 images across steps
+        self.last_image_files = []  # Track saved image filenames
 
-    def run(self, task: str, device: str, system_prompt: str = "",
-            on_step=None) -> dict:
+    def run(
+        self,
+        task: str,
+        device: str = "unknown",
+        system_prompt: str = "",
+        on_step: callable = None,
+    ) -> dict:
         """
         Execute a task autonomously using the ReAct loop.
 
@@ -167,6 +254,10 @@ class MOCAAgent:
         """
         task_id = str(uuid.uuid4())[:8]
         start_time = time.time()
+        self.last_images = []
+        self.last_image_files = []
+        self._failure_sent = False
+        self._cached_failure = None
 
         # Complexity assessment
         if is_simple_task(task):
@@ -242,7 +333,7 @@ class MOCAAgent:
                         messages=messages,
                         response_format={"type": "json_object"},
                         temperature=0.7,
-                        max_tokens=2048,
+                        max_tokens=4096,
                     )
                 except Exception:
                     # Fallback without response_format for models that don't support it
@@ -250,7 +341,7 @@ class MOCAAgent:
                         model=self.model,
                         messages=messages,
                         temperature=0.7,
-                        max_tokens=2048,
+                        max_tokens=4096,
                     )
 
                 raw_content = response.choices[0].message.content or "{}"
@@ -264,6 +355,15 @@ class MOCAAgent:
                     f"Model call failed: {str(e)}",
                     "model_error",
                 )
+
+            # Strip <think>...</think> reasoning blocks and markdown wrappers
+            raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+            raw_content = re.sub(r'<think>.*$', '', raw_content, flags=re.DOTALL).strip()
+            raw_content = re.sub(r'<reasoning>.*?</reasoning>', '', raw_content, flags=re.DOTALL).strip()
+            raw_content = re.sub(r'<reasoning>.*$', '', raw_content, flags=re.DOTALL).strip()
+            raw_content = re.sub(r'^```json\s*', '', raw_content, flags=re.MULTILINE)
+            raw_content = re.sub(r'\s*```$', '', raw_content, flags=re.MULTILINE)
+            raw_content = raw_content.strip() or "{}"
 
             # Parse JSON response
             try:
@@ -322,6 +422,11 @@ class MOCAAgent:
                 output_text = result["output"] or result["error"]
                 output_history.append(output_text)
 
+                if result.get("images"):
+                    self.last_images = result["images"]
+                if result.get("image_files"):
+                    self.last_image_files = result["image_files"]
+
                 if not result["success"]:
                     consecutive_failures += 1
                     code_hash = hash(action_input)
@@ -360,11 +465,11 @@ class MOCAAgent:
                     result_message = f"Code result:\n{result['output']}"
                     if result["error"]:
                         result_message += f"\nErrors:\n{result['error']}"
-                    if result["images"]:
+                    if result.get("image_files"):
+                        files_list = ", ".join(result["image_files"])
                         result_message += (
-                            f"\n\n{len(result['images'])} image(s) generated. "
-                            f"Use these base64 strings in your display HTML "
-                            f"as <img src='data:image/png;base64,{{b64}}'>"
+                            f"\n\n{len(result['image_files'])} image(s) saved: {files_list}. "
+                            f"Reference them in display_file HTML as /files/FILENAME.png"
                         )
 
                     messages.append({
@@ -373,15 +478,24 @@ class MOCAAgent:
                     })
 
             elif action == "duckduckgo_search":
-                search_results = self.executor.web_search(action_input)
+                search_data = self.executor.web_search(action_input)
+                search_results = search_data.get("results", [])
+                image_urls = search_data.get("image_urls", [])
                 formatted = format_search_results(search_results)
+
+                # Append image URLs section if found
+                if image_urls:
+                    formatted += "\n\nDirect image URLs found (use these in img tags):\n"
+                    for img_url in image_urls:
+                        formatted += f"  {img_url}\n"
 
                 output_history.append(formatted)
                 consecutive_failures = 0  # Search doesn't count as failure
 
                 agent_logger.info(
                     f"SEARCH_RESULT | id={task_id} | step={step} | "
-                    f"query={action_input} | results={len(search_results)}"
+                    f"query={action_input} | results={len(search_results)} | "
+                    f"image_urls={len(image_urls)}"
                 )
 
                 messages.append({
@@ -397,7 +511,6 @@ class MOCAAgent:
                 # Save integration if requested
                 if save_integration and isinstance(save_integration, dict):
                     try:
-                        # Find the last code that was executed successfully
                         integration_code = self._find_last_successful_code(
                             messages
                         )
@@ -423,6 +536,54 @@ class MOCAAgent:
                             f"error={str(e)}"
                         )
 
+                # ── Task completion validation ──────────────
+                candidate = self._build_response(
+                    task_id, device, step, start_time,
+                    action_input, parsed,
+                )
+
+                complete, reason = is_task_complete(task, candidate)
+
+                if not complete and not hasattr(self, '_completion_retries'):
+                    self._completion_retries = 0
+
+                if not complete and getattr(self, '_completion_retries', 0) < 2:
+                    self._completion_retries = getattr(self, '_completion_retries', 0) + 1
+                    agent_logger.warning(
+                        f"INCOMPLETE | id={task_id} | step={step} | "
+                        f"retry={self._completion_retries} | reason={reason}"
+                    )
+
+                    # Feed reason back and loop again
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps(parsed),
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Task NOT complete: {reason}\n\n"
+                            "Try again. Use moca_command 'respond' with "
+                            "is_final: true only when the task is truly done. "
+                            "Include display field with HTML content when "
+                            "visual output is needed."
+                        ),
+                    })
+
+                    if on_step:
+                        on_step({
+                            "step": step,
+                            "narration": "Refining response...",
+                            "total_steps": self.max_steps,
+                        })
+
+                    step += 1
+                    continue  # Re-enter while loop
+
+                # Clean up retry counter
+                if hasattr(self, '_completion_retries'):
+                    del self._completion_retries
+
                 total_time = time.time() - start_time
                 agent_logger.info(
                     f"COMPLETE | id={task_id} | steps={step} | "
@@ -431,10 +592,7 @@ class MOCAAgent:
                     f"integration_created={integration_created}"
                 )
 
-                return self._build_response(
-                    task_id, device, step, start_time,
-                    action_input, parsed,
-                )
+                return candidate
 
             else:
                 # Unknown action or respond without is_final — continue
@@ -537,29 +695,74 @@ class MOCAAgent:
         """Build a successful final response."""
         total_time = time.time() - start_time
 
-        # Try to extract display from the action_input if it contains HTML
         display = None
-        if parsed:
-            # Check if the model included display info in the response
+
+        # ── Handle display_file: full HTML page → save to workspace ──
+        display_file_html = parsed.get("display_file") if parsed else None
+        if display_file_html and isinstance(display_file_html, str) and display_file_html.strip():
+            html = display_file_html
+            filename = self.executor.save_display_file(html)
+            display = {"url": f"{SERVER_URL}/files/{filename}"}
+            agent_logger.info(
+                f"DISPLAY_FILE | id={task_id} | file={filename} | "
+                f"size={len(html)} bytes"
+            )
+
+        # ── Fallback: model returned command_payload as nested JSON ──
+        if not display and reply_text and reply_text.strip().startswith("{"):
+            try:
+                nested = json.loads(reply_text)
+                if isinstance(nested, dict) and "reply" in nested:
+                    reply_text = nested["reply"]
+                    if nested.get("display_file"):
+                        html = nested["display_file"]
+                        filename = self.executor.save_display_file(html)
+                        display = {"url": f"{SERVER_URL}/files/{filename}"}
+                    elif nested.get("display"):
+                        display = nested["display"]
+                    agent_logger.info(
+                        f"PARSED_NESTED_REPLY | id={task_id} | "
+                        f"has_display={display is not None}"
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # ── Fallback: old-style display dict in parsed response ──
+        if not display and parsed:
             display_data = parsed.get("display")
             if display_data:
                 display = display_data
 
-        # If reply contains HTML-like display content, try to build display
+        # ── Fallback: reply contains raw HTML ──
         if not display and reply_text and "<div" in reply_text:
-            display = {
-                "layout": "single",
-                "windows": [{
-                    "type": "html",
-                    "title": "MOCA",
-                    "content": reply_text,
-                }],
-            }
-            # Clean reply for speech
+            # Wrap in full page and save
+            full_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ background: #0d0d14; color: #e0e0e0; font-family: system-ui, sans-serif; padding: 20px; }}
+img {{ max-width: 100%; border-radius: 6px; }}
+</style></head>
+<body>{reply_text}</body></html>"""
+            filename = self.executor.save_display_file(full_html)
+            display = {"url": f"{SERVER_URL}/files/{filename}"}
             reply_text = parsed.get("narration", "Done Boss.") if parsed else "Done Boss."
 
-        # Check for images in the execution history (from executor)
-        # The model should have embedded them in the display HTML already
+        # ── Normalize old-style windows display ──
+        if display and "windows" in display:
+            img_url = None
+            if self.last_image_files:
+                img_url = f"{SERVER_URL}/files/{self.last_image_files[0]}"
+            for window in display.get("windows", []):
+                content = window.get("content", "")
+                if content and img_url:
+                    content = content.replace("{{IMAGE_URL}}", img_url)
+                    window["content"] = content
+
+        # Clean placeholders from reply text
+        if reply_text:
+            reply_text = reply_text.replace("{{IMAGE_BASE64}}", "")
+            reply_text = reply_text.replace("{{IMAGE_URL}}", "")
 
         result = {
             "reply": reply_text or "Done Boss.",
@@ -578,9 +781,17 @@ class MOCAAgent:
         start_time: float, reason_text: str, stopped_reason: str,
     ) -> dict:
         """Build a failure response with honest explanation."""
+        # Guard against double failure — return cached first response
+        if self._failure_sent:
+            agent_logger.warning(
+                f"DUPLICATE_FAILURE_BLOCKED | id={task_id} | reason={stopped_reason}"
+            )
+            return self._cached_failure
+        self._failure_sent = True
+
         total_time = time.time() - start_time
 
-        return {
+        self._cached_failure = {
             "reply": reason_text,
             "display": None,
             "action": None,
@@ -590,6 +801,7 @@ class MOCAAgent:
             "total_time": round(total_time, 2),
             "stopped_reason": stopped_reason,
         }
+        return self._cached_failure
 
     def _find_last_successful_code(self, messages: list) -> str:
         """Find the last successfully executed code from message history."""
