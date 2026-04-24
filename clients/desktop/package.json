@@ -1,0 +1,37 @@
+{
+  "name": "moca-desktop",
+  "version": "1.0.0",
+  "main": "main.js",
+  "description": "MOCA Desktop Client",
+  "scripts": {
+    "start": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.moca.desktop",
+    "productName": "MOCA",
+    "files": [
+      "main.js",
+      "preload.js",
+      "panel-preload.js",
+      "display.html",
+      "panel.html",
+      "config.json",
+      "listener.py",
+      "speaker.py",
+      "assets/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities"
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1"
+  }
+}

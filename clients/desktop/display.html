@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    background: rgba(10, 10, 15, 0.92);
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    overflow: hidden;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+
+  #title {
+    position: fixed;
+    top: 12px;
+    left: 16px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #00d4ff;
+    opacity: 0.6;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    z-index: 10;
+    -webkit-app-region: drag;
+  }
+
+  #content {
+    position: absolute;
+    top: 36px;
+    left: 0;
+    right: 0;
+    bottom: 56px;
+    padding: 16px 20px;
+    overflow-y: auto;
+    -webkit-app-region: no-drag;
+    user-select: text;
+  }
+
+  /* Minimal scrollbar */
+  #content::-webkit-scrollbar { width: 4px; }
+  #content::-webkit-scrollbar-track { background: transparent; }
+  #content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 2px;
+  }
+  #content::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  /* Close button — circle with X at bottom centre */
+  #close-btn {
+    position: fixed;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(255, 255, 255, 0.4);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.4;
+    transition: opacity 0.2s, border-color 0.2s;
+    z-index: 100;
+    -webkit-app-region: no-drag;
+  }
+
+  #close-btn:hover {
+    opacity: 1;
+    border-color: #ffffff;
+  }
+
+  #close-btn svg {
+    width: 12px;
+    height: 12px;
+    stroke: #ffffff;
+    stroke-width: 2;
+    fill: none;
+  }
+
+  /* Content styling for injected HTML */
+  #content h1, #content h2, #content h3 {
+    color: #00d4ff;
+    margin-bottom: 8px;
+  }
+  #content h1 { font-size: 20px; }
+  #content h2 { font-size: 16px; }
+  #content h3 { font-size: 14px; }
+
+  #content p { line-height: 1.6; margin-bottom: 10px; }
+
+  #content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+  }
+  #content th, #content td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    text-align: left;
+  }
+  #content th {
+    color: #00d4ff;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  #content a {
+    color: #00d4ff;
+    text-decoration: none;
+  }
+  #content a:hover { text-decoration: underline; }
+
+  #content code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 13px;
+  }
+
+  #content pre {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 10px 0;
+  }
+
+  #content img {
+    max-width: 100%;
+    border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+  <div id="title"></div>
+  <div id="content"></div>
+  <button id="close-btn">
+    <svg viewBox="0 0 12 12">
+      <line x1="2" y1="2" x2="10" y2="10"/>
+      <line x1="10" y1="2" x2="2" y2="10"/>
+    </svg>
+  </button>
+
+  <script>
+    document.getElementById("close-btn").addEventListener("click", () => {
+      window.moca.close();
+    });
+
+    window.addEventListener("DOMContentLoaded", async () => {
+      const data = await window.moca.getContent();
+      if (data) {
+        document.getElementById("title").textContent = data.title || "";
+        document.getElementById("content").innerHTML = data.content || "";
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: #e0e0e0;
+  }
+
+  #panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 400px;
+    height: 100%;
+    background: #0d0d14;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 250ms ease-out;
+  }
+
+  #panel.open {
+    transform: translateX(0);
+  }
+
+  #panel.closing {
+    transform: translateX(100%);
+    transition: transform 250ms ease-in;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    -webkit-app-region: drag;
+    flex-shrink: 0;
+  }
+
+  .header-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #00d4ff;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #555;
+    margin-left: 10px;
+    flex-shrink: 0;
+  }
+
+  .status-dot.online { background: #34c759; }
+
+  .close-btn {
+    margin-left: auto;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.4;
+    transition: opacity 0.2s;
+    -webkit-app-region: no-drag;
+  }
+
+  .close-btn:hover { opacity: 1; }
+
+  .close-btn svg {
+    width: 12px;
+    height: 12px;
+    stroke: #fff;
+    stroke-width: 2;
+    fill: none;
+  }
+
+  /* Context cards area */
+  .context-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+  }
+
+  .context-area::-webkit-scrollbar { width: 4px; }
+  .context-area::-webkit-scrollbar-track { background: transparent; }
+  .context-area::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 2px;
+  }
+
+  .context-area.compact {
+    flex: 0;
+    overflow: hidden;
+    padding: 8px 20px;
+  }
+
+  .context-area.compact .card {
+    padding: 6px 10px;
+    margin-bottom: 4px;
+  }
+
+  .context-area.compact .card-title { margin-bottom: 0; }
+  .context-area.compact .card-body { display: none; }
+
+  .card {
+    background: #16161f;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+  }
+
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #00d4ff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+
+  .card-body {
+    font-size: 13px;
+    line-height: 1.5;
+    color: #aaa;
+  }
+
+  .card-body .value {
+    color: #e0e0e0;
+    font-weight: 500;
+  }
+
+  /* Chat toggle */
+  .chat-toggle {
+    padding: 10px 20px;
+    flex-shrink: 0;
+  }
+
+  .chat-toggle button {
+    width: 100%;
+    padding: 10px;
+    background: #16161f;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    color: #e0e0e0;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .chat-toggle button:hover {
+    background: #1e1e2e;
+  }
+
+  /* Chat area */
+  .chat-area {
+    display: none;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .chat-area.visible {
+    display: flex;
+  }
+
+  .chat-header {
+    display: flex;
+    align-items: center;
+    padding: 8px 20px;
+    flex-shrink: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .chat-header-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #00d4ff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .chat-collapse-btn {
+    margin-left: auto;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.4;
+    transition: opacity 0.2s;
+  }
+
+  .chat-collapse-btn:hover { opacity: 1; }
+
+  .chat-collapse-btn svg {
+    width: 12px;
+    height: 12px;
+    stroke: #fff;
+    stroke-width: 2;
+    fill: none;
+  }
+
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 20px;
+  }
+
+  .chat-messages::-webkit-scrollbar { width: 4px; }
+  .chat-messages::-webkit-scrollbar-track { background: transparent; }
+  .chat-messages::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 2px;
+  }
+
+  .chat-msg {
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 10px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    word-wrap: break-word;
+  }
+
+  .chat-msg.user {
+    background: #1a1a2e;
+    margin-left: auto;
+    border-bottom-right-radius: 4px;
+  }
+
+  .chat-msg.moca {
+    background: rgba(0, 212, 255, 0.08);
+    margin-right: auto;
+    border-bottom-left-radius: 4px;
+  }
+
+  .chat-msg.moca .msg-label {
+    font-size: 10px;
+    color: #00d4ff;
+    margin-bottom: 2px;
+    font-weight: 600;
+  }
+
+  /* Chat input */
+  .chat-input-area {
+    display: flex;
+    padding: 12px 20px;
+    gap: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    flex-shrink: 0;
+  }
+
+  .chat-input-area input {
+    flex: 1;
+    background: #16161f;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: #e0e0e0;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .chat-input-area input:focus {
+    border-color: #00d4ff40;
+  }
+
+  .chat-input-area input::placeholder {
+    color: #555;
+  }
+
+  /* Loading dots */
+  .typing-indicator {
+    display: none;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    max-width: 60px;
+  }
+
+  .typing-indicator.visible { display: block; }
+
+  .typing-indicator span {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: #00d4ff;
+    border-radius: 50%;
+    margin-right: 4px;
+    animation: bounce 1.2s infinite;
+    opacity: 0.4;
+  }
+
+  .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <div class="header">
+      <span class="header-title">MOCA</span>
+      <span class="status-dot" id="statusDot"></span>
+      <button class="close-btn" id="closeBtn">
+        <svg viewBox="0 0 12 12">
+          <line x1="2" y1="2" x2="10" y2="10"/>
+          <line x1="10" y1="2" x2="2" y2="10"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="context-area" id="contextArea"></div>
+
+    <div class="chat-toggle" id="chatToggle">
+      <button id="chatToggleBtn">Chat</button>
+    </div>
+
+    <div class="chat-area" id="chatArea">
+      <div class="chat-header">
+        <span class="chat-header-title">Chat</span>
+        <button class="chat-collapse-btn" id="chatCollapseBtn">
+          <svg viewBox="0 0 12 12">
+            <polyline points="2,4 6,8 10,4" />
+          </svg>
+        </button>
+      </div>
+      <div class="chat-messages" id="chatMessages">
+        <div class="typing-indicator" id="typingIndicator">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <input type="text" id="chatInput" placeholder="Message MOCA..." autocomplete="off" />
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const panel = document.getElementById("panel");
+    const statusDot = document.getElementById("statusDot");
+    const contextArea = document.getElementById("contextArea");
+    const chatToggle = document.getElementById("chatToggle");
+    const chatToggleBtn = document.getElementById("chatToggleBtn");
+    const chatArea = document.getElementById("chatArea");
+    const chatMessages = document.getElementById("chatMessages");
+    const chatInput = document.getElementById("chatInput");
+    const typingIndicator = document.getElementById("typingIndicator");
+    const closeBtn = document.getElementById("closeBtn");
+
+    let chatOpen = false;
+    let statusPollTimer = null;
+
+    // --- Status dot ---
+    function setOnline(isOnline) {
+      statusDot.classList.toggle("online", isOnline);
+    }
+
+    // --- Context cards ---
+    function renderCards(data) {
+      if (!data) return;
+      let html = "";
+
+      if (data.ram) {
+        html += `<div class="card">
+          <div class="card-title">System</div>
+          <div class="card-body">
+            RAM: <span class="value">${data.ram.available_mb}MB free</span> / ${data.ram.total_mb}MB
+            (<span class="value">${data.ram.percent_used}%</span> used)
+          </div>
+        </div>`;
+      }
+
+      if (data.conversation_length > 0) {
+        html += `<div class="card">
+          <div class="card-title">Conversation</div>
+          <div class="card-body"><span class="value">${data.conversation_length}</span> messages in history</div>
+        </div>`;
+      }
+
+      if (data.now_playing) {
+        html += `<div class="card">
+          <div class="card-title">Now Playing</div>
+          <div class="card-body"><span class="value">${data.now_playing}</span></div>
+        </div>`;
+      }
+
+      if (data.upcoming_meeting) {
+        html += `<div class="card">
+          <div class="card-title">Next Meeting</div>
+          <div class="card-body"><span class="value">${data.upcoming_meeting}</span></div>
+        </div>`;
+      }
+
+      if (data.active_tasks && data.active_tasks.length > 0) {
+        const taskList = data.active_tasks.map(t => `<span class="value">${t}</span>`).join("<br>");
+        html += `<div class="card">
+          <div class="card-title">Tasks</div>
+          <div class="card-body">${taskList}</div>
+        </div>`;
+      }
+
+      if (data.flagged_messages && data.flagged_messages.length > 0) {
+        const flagList = data.flagged_messages.map(m => `<span class="value">${m}</span>`).join("<br>");
+        html += `<div class="card">
+          <div class="card-title">Flagged</div>
+          <div class="card-body">${flagList}</div>
+        </div>`;
+      }
+
+      contextArea.innerHTML = html || `<div class="card"><div class="card-body" style="color:#555">No context data</div></div>`;
+    }
+
+    async function pollStatus() {
+      try {
+        const data = await window.mocaPanel.getStatus();
+        if (data) renderCards(data);
+      } catch (e) {
+        // silent
+      }
+    }
+
+    // --- Chat ---
+    function addMessage(text, role) {
+      const div = document.createElement("div");
+      div.className = `chat-msg ${role}`;
+      if (role === "moca") {
+        div.innerHTML = `<div class="msg-label">MOCA</div>${escapeHtml(text)}`;
+      } else {
+        div.textContent = text;
+      }
+      chatMessages.insertBefore(div, typingIndicator);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      const d = document.createElement("div");
+      d.textContent = text;
+      return d.innerHTML;
+    }
+
+    function showTyping(show) {
+      typingIndicator.classList.toggle("visible", show);
+      if (show) chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = chatInput.value.trim();
+      if (!text) return;
+
+      chatInput.value = "";
+      addMessage(text, "user");
+      showTyping(true);
+
+      try {
+        const resp = await window.mocaPanel.sendChat(text);
+        showTyping(false);
+        if (resp && resp.reply) {
+          addMessage(resp.reply, "moca");
+        }
+      } catch (e) {
+        showTyping(false);
+        addMessage("Connection error", "moca");
+      }
+    }
+
+    // --- Chat toggle ---
+    function openChat() {
+      chatOpen = true;
+      chatArea.classList.add("visible");
+      contextArea.classList.add("compact");
+      chatToggle.style.display = "none";
+      chatInput.focus();
+    }
+
+    function closeChat() {
+      chatOpen = false;
+      chatArea.classList.remove("visible");
+      contextArea.classList.remove("compact");
+      chatToggle.style.display = "block";
+    }
+
+    chatToggleBtn.addEventListener("click", openChat);
+
+    const chatCollapseBtn = document.getElementById("chatCollapseBtn");
+    chatCollapseBtn.addEventListener("click", closeChat);
+
+    chatInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // --- Close ---
+    closeBtn.addEventListener("click", () => {
+      window.mocaPanel.closePanel();
+    });
+
+    // --- IPC listeners ---
+    window.mocaPanel.onServerStatus((isOnline) => {
+      setOnline(isOnline);
+    });
+
+    window.mocaPanel.onDisplayUpdate((data) => {
+      // Voice response arrived — show in chat
+      if (data.userMessage) {
+        addMessage(data.userMessage, "user");
+      }
+      if (data.reply) {
+        addMessage(data.reply, "moca");
+      }
+      // Open chat if not already
+      if (!chatOpen) {
+        openChat();
+      }
+    });
+
+    // --- Slide animations ---
+    window.mocaPanel.onSlideIn(() => {
+      requestAnimationFrame(() => {
+        panel.classList.remove("closing");
+        panel.classList.add("open");
+      });
+    });
+
+    window.mocaPanel.onSlideOut(() => {
+      panel.classList.add("closing");
+      panel.classList.remove("open");
+    });
+
+    // --- Init ---
+    window.addEventListener("DOMContentLoaded", () => {
+      window.mocaPanel.ready();
+      pollStatus();
+      statusPollTimer = setInterval(pollStatus, 10000);
+    });
+  </script>
+</body>
+</html>

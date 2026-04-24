@@ -1,0 +1,4 @@
+SpeechRecognition
+pyaudio
+sounddevice
+numpy

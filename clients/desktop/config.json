@@ -1,0 +1,14 @@
+{
+  "server": "http://141.148.199.180:8080",
+  "wake_words": ["moca", "mo"],
+  "tts": {
+    "engine": "piper",
+    "model": "models/en_US-amy-medium.onnx",
+    "speed": 1.0
+  },
+  "voice": {
+    "energy_threshold": 300,
+    "pause_threshold": 1.2,
+    "phrase_time_limit": 30
+  }
+}

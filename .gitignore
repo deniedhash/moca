@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+memory/
+workspace/
+integrations/
+.DS_Store
+*.log
+config.py
+node_modules/
+clients/desktop/models/
