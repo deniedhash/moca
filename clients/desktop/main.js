@@ -54,6 +54,9 @@ function createDisplayWindow(windowSpec, bounds) {
     },
   });
 
+  // Show on all macOS Spaces
+  win.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true, visibleOnFullScreen: true });
+
   // Store content for this window so preload can fetch it
   win._mocaContent = {
     title: windowSpec.title || "",
@@ -232,18 +235,27 @@ ipcMain.handle("display-get-content", (event) => {
 
 // --- Panel window ---
 
+function getActiveDisplay() {
+  const cursor = screen.getCursorScreenPoint();
+  return screen.getDisplayNearestPoint(cursor);
+}
+
+// Return the usable screen area (respects menu bar and dock)
+function getDisplayBounds() {
+  const display = getActiveDisplay();
+  return display.workArea;
+}
+
 function createPanelWindow() {
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { width: screenW } = primaryDisplay.workAreaSize;
-  const { y: workY, height: workH } = primaryDisplay.workArea;
+  const { x: bx, y: by, width: bw, height: bh } = getDisplayBounds();
 
   const panelPreloadPath = path.join(__dirname, "panel-preload.js");
 
   const win = new BrowserWindow({
     width: 400,
-    height: workH,
-    x: screenW - 400,
-    y: workY,
+    height: bh,
+    x: bx + bw - 400,
+    y: by,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -260,6 +272,9 @@ function createPanelWindow() {
     },
   });
 
+  // Show on all macOS Spaces
+  win.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true, visibleOnFullScreen: true });
+
   win.loadFile("panel.html");
 
   win.on("closed", () => {
@@ -269,6 +284,11 @@ function createPanelWindow() {
     }
   });
 
+  // Resize to fit active display when panel gains focus (e.g. switching monitors)
+  win.on("focus", () => {
+    if (panelOpen) resizePanelToScreen();
+  });
+
   log("PANEL", "Window created");
   return win;
 }
@@ -276,9 +296,7 @@ function createPanelWindow() {
 function createOverlay() {
   destroyOverlay();
 
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { width, height } = primaryDisplay.workAreaSize;
-  const { x, y } = primaryDisplay.workArea;
+  const { x, y, width, height } = getDisplayBounds();
 
   overlayWindow = new BrowserWindow({
     width,
@@ -294,6 +312,9 @@ function createOverlay() {
     movable: false,
     hasShadow: false,
   });
+
+  // Show on all macOS Spaces
+  overlayWindow.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true, visibleOnFullScreen: true });
 
   // Near-invisible overlay — rgba(0,0,0,0.01) so clicks register (fully transparent = click-through)
   overlayWindow.loadURL("data:text/html,<html><body style='margin:0;background:rgba(0,0,0,0.01);width:100vw;height:100vh'></body></html>");
@@ -352,6 +373,18 @@ function slideInPanel() {
 
   repositionDisplayWindows();
   log("PANEL", "Opened");
+}
+
+function resizePanelToScreen() {
+  const { x: bx, y: by, width: bw, height: bh } = getDisplayBounds();
+
+  if (panelWindow && !panelWindow.isDestroyed()) {
+    panelWindow.setBounds({ x: bx + bw - 400, y: by, width: 400, height: bh }, true);
+  }
+
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.setBounds({ x: bx, y: by, width: bw, height: bh }, true);
+  }
 }
 
 function slideOutPanel() {
@@ -791,6 +824,19 @@ app.on("ready", () => {
   spawnSpeaker();
   spawnListener();
   startHealthCheck();
+
+  // Resize panel/overlay when display metrics change (e.g. switching Spaces, dock show/hide)
+  screen.on("display-metrics-changed", (_event, _display, changedMetrics) => {
+    log("DISPLAY", `Metrics changed: ${changedMetrics.join(", ")}`);
+    if (panelOpen) {
+      // Delay to let macOS finalize Space transition
+      setTimeout(() => {
+        const bounds = getDisplayBounds();
+        log("DISPLAY", `Resizing panel to: x=${bounds.x} y=${bounds.y} w=${bounds.width} h=${bounds.height}`);
+        resizePanelToScreen();
+      }, 300);
+    }
+  });
 
   log("BOOT", "MOCA Desktop started");
   log("BOOT", `Server: ${SERVER}`);
