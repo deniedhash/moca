@@ -23,6 +23,8 @@ let processing = false;
 // --- Panel state ---
 let panelWindow = null;
 let panelOpen = false;
+let overlayWindow = null;
+
 
 // --- Display windows ---
 
@@ -237,7 +239,7 @@ function createPanelWindow() {
 
   const panelPreloadPath = path.join(__dirname, "panel-preload.js");
 
-  panelWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 400,
     height: workH,
     x: screenW - 400,
@@ -258,21 +260,66 @@ function createPanelWindow() {
     },
   });
 
-  panelWindow.loadFile("panel.html");
+  win.loadFile("panel.html");
 
-  panelWindow.on("blur", () => {
-    // Don't close if focus went to a display window
-    const focused = BrowserWindow.getFocusedWindow();
-    if (focused && displayWindows.has(focused._mocaTitle)) return;
-    if (panelOpen) slideOutPanel();
-  });
-
-  panelWindow.on("closed", () => {
-    panelWindow = null;
-    panelOpen = false;
+  win.on("closed", () => {
+    if (panelWindow === win) {
+      panelWindow = null;
+      panelOpen = false;
+    }
   });
 
   log("PANEL", "Window created");
+  return win;
+}
+
+function createOverlay() {
+  destroyOverlay();
+
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width, height } = primaryDisplay.workAreaSize;
+  const { x, y } = primaryDisplay.workArea;
+
+  overlayWindow = new BrowserWindow({
+    width,
+    height,
+    x,
+    y,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: true,
+    resizable: false,
+    movable: false,
+    hasShadow: false,
+  });
+
+  // Near-invisible overlay — rgba(0,0,0,0.01) so clicks register (fully transparent = click-through)
+  overlayWindow.loadURL("data:text/html,<html><body style='margin:0;background:rgba(0,0,0,0.01);width:100vw;height:100vh'></body></html>");
+
+  overlayWindow.on("closed", () => {
+    overlayWindow = null;
+  });
+
+  // Click on overlay → it gains focus → close panel
+  overlayWindow.on("focus", () => {
+    if (panelOpen) slideOutPanel();
+  });
+}
+
+function destroyOverlay() {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.destroy();
+  }
+  overlayWindow = null;
+}
+
+function destroyPanel() {
+  if (panelWindow && !panelWindow.isDestroyed()) {
+    panelWindow.destroy();
+  }
+  panelWindow = null;
 }
 
 function togglePanel() {
@@ -284,16 +331,23 @@ function togglePanel() {
 }
 
 function slideInPanel() {
-  if (!panelWindow || panelWindow.isDestroyed()) {
-    createPanelWindow();
-  }
+  // Destroy old panel — fresh window always appears on current Space (BUG 3 fix)
+  destroyPanel();
+  destroyOverlay();
 
+  // Create fresh panel on current Space
+  panelWindow = createPanelWindow();
+
+  // Create overlay behind panel to catch outside clicks (BUG 2 — replaces blur)
+  createOverlay();
+
+  // Show panel on top, focus it
   panelWindow.show();
+  panelWindow.focus();
   panelOpen = true;
 
   // Tell renderer to animate in
   panelWindow.webContents.send("panel-slide-in");
-  // Send current online status
   panelWindow.webContents.send("panel-server-status", online);
 
   repositionDisplayWindows();
@@ -304,14 +358,22 @@ function slideOutPanel() {
   if (!panelWindow || panelWindow.isDestroyed()) return;
 
   panelOpen = false;
+  destroyOverlay();
 
-  // Tell renderer to animate out, then hide
+  // Tell renderer to animate out, then destroy
   panelWindow.webContents.send("panel-slide-out");
+  const win = panelWindow;
   setTimeout(() => {
-    if (panelWindow && !panelWindow.isDestroyed()) {
-      panelWindow.hide();
+    if (win && !win.isDestroyed()) {
+      win.destroy();
     }
+    if (panelWindow === win) panelWindow = null;
     repositionDisplayWindows();
+
+    // Return focus to the previously active app (macOS dock is hidden)
+    if (displayWindows.size === 0 && app.hide) {
+      app.hide();
+    }
   }, 250);
 
   log("PANEL", "Closed");
@@ -440,7 +502,11 @@ function createTray() {
     togglePanel();
   });
 
-  // Right click shows minimal context menu
+  // Right click shows context menu
+  tray.on("right-click", () => {
+    tray.popUpContextMenu(buildTrayMenu());
+  });
+
   updateTrayMenu();
 }
 
@@ -474,11 +540,8 @@ function createStatusDot(color) {
   return nativeImage.createFromBuffer(canvas, { width: size, height: size });
 }
 
-function updateTrayMenu() {
-  const icon = loadTrayIcon(muted ? "icon-muted.png" : "icon.png");
-  tray.setImage(icon);
-
-  const menu = Menu.buildFromTemplate([
+function buildTrayMenu() {
+  return Menu.buildFromTemplate([
     { label: "MOCA v1.0", enabled: false },
     { type: "separator" },
     {
@@ -507,8 +570,11 @@ function updateTrayMenu() {
       },
     },
   ]);
+}
 
-  tray.setContextMenu(menu);
+function updateTrayMenu() {
+  const icon = loadTrayIcon(muted ? "icon-muted.png" : "icon.png");
+  tray.setImage(icon);
 }
 
 // --- Logging ---
@@ -695,10 +761,8 @@ function startHealthCheck() {
 function cleanup() {
   app.isQuitting = true;
   closeAllDisplayWindows();
-  if (panelWindow && !panelWindow.isDestroyed()) {
-    panelWindow.close();
-    panelWindow = null;
-  }
+  destroyOverlay();
+  destroyPanel();
   if (listener) {
     listener.kill();
     listener = null;
@@ -727,9 +791,6 @@ app.on("ready", () => {
   spawnSpeaker();
   spawnListener();
   startHealthCheck();
-
-  // Pre-create panel window (hidden)
-  createPanelWindow();
 
   log("BOOT", "MOCA Desktop started");
   log("BOOT", `Server: ${SERVER}`);
