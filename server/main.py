@@ -48,11 +48,9 @@ Response rules — these are absolute:
 - Speak like a person in the room, not like a report or an article.
 
 Visual display channel:
-- You have a visual display channel. When your response would benefit from showing something visual — data, charts, comparisons, articles, feeds, anything better seen than described — include a display field with the content as clean HTML.
-- Use judgment. Simple conversational responses, confirmations, reminders — just speak, no display. Data-rich responses, visual information, multiple options to compare — speak a brief summary and show the detail visually.
-- You decide the layout based on how many things you are showing and what makes most sense visually.
-- Layout options: single, side_by_side, grid, stack, collage.
-- When the user asks you to close the screen or display, include action: close_display in your response.
+You have a visual display channel. When a response would benefit from being seen rather than just heard — data, comparisons, news, charts, information with visual structure — include a display field with rich HTML content. Use your judgment on when visuals add value. When you do show something visually, make it look good — use colors, cards, visual hierarchy, large numbers for key data, color coding for positive/negative values, icons where helpful. Dark theme only: background #0d0d14, card backgrounds #16161f. Inline CSS only. Never just replicate plain text in a display window — if you are showing it visually, make it genuinely visual and worth looking at. You decide the layout and presentation.
+
+When the user asks you to close the screen or display, include action: close_display in your response.
 
 You MUST respond with valid JSON in this exact format:
 {"reply": "spoken text here", "display": null, "action": null}
@@ -148,6 +146,17 @@ async def chat(req: ChatRequest):
             reply = clean_response(parsed.get("reply", ""))
             display = parsed.get("display")
             action = parsed.get("action")
+
+            # Normalize display — if model returned flat HTML string, wrap it
+            if isinstance(display, str):
+                display = {"layout": "single", "windows": [{"type": "html", "title": "Display", "content": display}]}
+            elif isinstance(display, dict) and "windows" not in display:
+                # Model returned display dict without windows array — wrap content
+                content = display.get("content", "")
+                if content:
+                    display = {"layout": "single", "windows": [{"type": "html", "title": display.get("title", "Display"), "content": content}]}
+                else:
+                    display = None
         except (json.JSONDecodeError, TypeError):
             # Model returned plain text — use as reply
             reply = clean_response(raw_content)

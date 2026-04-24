@@ -484,7 +484,7 @@ function httpRequest(method, urlStr, body) {
       path: url.pathname,
       method,
       headers: {},
-      timeout: 15000,
+      timeout: 30000,
     };
 
     if (body) {
@@ -636,14 +636,21 @@ function spawnSpeaker() {
 }
 
 function speakAndWait(text) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (!speaker || !speaker.stdin.writable) {
       spawnSpeaker();
     }
 
+    const timeout = setTimeout(() => {
+      speaker.stdout.removeListener("data", onData);
+      log("SPEAKER", "Timed out waiting for DONE");
+      resolve();
+    }, 30000);
+
     const onData = (data) => {
       const line = data.toString().trim();
       if (line === "DONE") {
+        clearTimeout(timeout);
         speaker.stdout.removeListener("data", onData);
         resolve();
       }
@@ -741,20 +748,27 @@ async function handleUtterance(text) {
       // Speak reply
       if (response.reply) {
         log("MOCA", response.reply);
-        await speakAndWait(response.reply);
+        try {
+          await speakAndWait(response.reply);
+        } catch (speakErr) {
+          log("ERROR", `Speaker error: ${speakErr.message}`);
+        }
       }
     }
   } catch (err) {
     log("ERROR", `Server error: ${err.message}`);
-    await speakAndWait("Having trouble reaching my brain Boss");
+    try {
+      await speakAndWait("Having trouble reaching my brain Boss");
+    } catch (speakErr) {
+      log("ERROR", `Speaker error during fallback: ${speakErr.message}`);
+    }
+  } finally {
+    // Always resume listener and clear processing flag
+    if (listener && listener.stdin.writable && !muted) {
+      listener.stdin.write("RESUME\n");
+    }
+    processing = false;
   }
-
-  // Resume listener
-  if (listener && listener.stdin.writable && !muted) {
-    listener.stdin.write("RESUME\n");
-  }
-
-  processing = false;
 }
 
 // --- Health check ---
