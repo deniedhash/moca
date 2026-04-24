@@ -146,6 +146,72 @@
     font-weight: 500;
   }
 
+  /* Agent context card */
+  .agent-card {
+    background: #16161f;
+    border: 1px solid rgba(0, 212, 255, 0.2);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    transition: opacity 0.5s ease, border-color 0.3s ease;
+  }
+
+  .agent-card.working {
+    border-color: rgba(255, 200, 50, 0.3);
+  }
+
+  .agent-card.done {
+    border-color: rgba(52, 199, 89, 0.3);
+  }
+
+  .agent-card.fading {
+    opacity: 0;
+  }
+
+  .agent-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .agent-card-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .agent-card-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #00d4ff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .agent-card.working .agent-card-title { color: #ffc832; }
+  .agent-card.done .agent-card-title { color: #34c759; }
+
+  .agent-card-step {
+    font-size: 10px;
+    color: #666;
+    margin-left: auto;
+  }
+
+  .agent-card-body {
+    font-size: 13px;
+    line-height: 1.5;
+    color: #aaa;
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { border-color: rgba(255, 200, 50, 0.2); }
+    50% { border-color: rgba(255, 200, 50, 0.5); }
+  }
+
+  .agent-card.working {
+    animation: pulse-border 2s ease-in-out infinite;
+  }
+
   /* Chat toggle */
   .chat-toggle {
     padding: 10px 20px;
@@ -263,6 +329,24 @@
     font-weight: 600;
   }
 
+  /* Agent step messages */
+  .chat-msg.agent-step {
+    background: rgba(255, 200, 50, 0.06);
+    margin-right: auto;
+    border-left: 2px solid rgba(255, 200, 50, 0.3);
+    font-size: 12px;
+    color: #999;
+    padding: 6px 10px;
+    margin-bottom: 4px;
+  }
+
+  .chat-msg.agent-step .step-label {
+    font-size: 9px;
+    color: #ffc832;
+    font-weight: 600;
+    margin-bottom: 1px;
+  }
+
   /* Chat input */
   .chat-input-area {
     display: flex;
@@ -374,10 +458,85 @@
 
     let chatOpen = false;
     let statusPollTimer = null;
+    let agentCardEl = null;
+    let agentFadeTimer = null;
+    let isStreaming = false;
+
+    // --- Complexity check (mirrors server/agent.py) ---
+    const SIMPLE_PATTERNS = [
+      "what time", "reminder", "set a", "what's my",
+      "who am i", "what do you know", "hello", "hi",
+      "thanks", "thank you", "close", "open",
+      "how are you", "what are you",
+    ];
+
+    function isSimpleTask(text) {
+      const lower = text.toLowerCase();
+      return (
+        SIMPLE_PATTERNS.some((p) => lower.includes(p)) ||
+        text.split(/\s+/).length <= 5
+      );
+    }
 
     // --- Status dot ---
     function setOnline(isOnline) {
       statusDot.classList.toggle("online", isOnline);
+    }
+
+    // --- Agent context card ---
+    function showAgentCard(state, body, step) {
+      // Clear any fade timer
+      if (agentFadeTimer) {
+        clearTimeout(agentFadeTimer);
+        agentFadeTimer = null;
+      }
+
+      // Remove existing agent card
+      if (agentCardEl) {
+        agentCardEl.remove();
+        agentCardEl = null;
+      }
+
+      const icons = { working: "⚡", done: "✓" };
+      const titles = { working: "Working", done: "Complete" };
+
+      const card = document.createElement("div");
+      card.className = `agent-card ${state}`;
+      card.innerHTML = `
+        <div class="agent-card-header">
+          <span class="agent-card-icon">${icons[state] || "⚡"}</span>
+          <span class="agent-card-title">${titles[state] || state}</span>
+          ${step ? `<span class="agent-card-step">step ${step}</span>` : ""}
+        </div>
+        <div class="agent-card-body">${escapeHtml(body)}</div>
+      `;
+
+      // Insert at top of context area
+      if (contextArea.firstChild) {
+        contextArea.insertBefore(card, contextArea.firstChild);
+      } else {
+        contextArea.appendChild(card);
+      }
+
+      agentCardEl = card;
+
+      // Auto-fade done cards after 5 seconds
+      if (state === "done") {
+        agentFadeTimer = setTimeout(() => {
+          card.classList.add("fading");
+          setTimeout(() => {
+            if (card.parentNode) card.remove();
+            if (agentCardEl === card) agentCardEl = null;
+          }, 500);
+        }, 5000);
+      }
+    }
+
+    function removeAgentCard() {
+      if (agentCardEl) {
+        agentCardEl.remove();
+        agentCardEl = null;
+      }
     }
 
     // --- Context cards ---
@@ -432,7 +591,12 @@
         </div>`;
       }
 
+      // Preserve agent card if present
+      const savedAgentCard = agentCardEl;
       contextArea.innerHTML = html || `<div class="card"><div class="card-body" style="color:#555">No context data</div></div>`;
+      if (savedAgentCard && savedAgentCard.parentNode !== contextArea) {
+        contextArea.insertBefore(savedAgentCard, contextArea.firstChild);
+      }
     }
 
     async function pollStatus() {
@@ -457,6 +621,14 @@
       chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
+    function addStepMessage(step, narration) {
+      const div = document.createElement("div");
+      div.className = "chat-msg agent-step";
+      div.innerHTML = `<div class="step-label">STEP ${step}</div>${escapeHtml(narration)}`;
+      chatMessages.insertBefore(div, typingIndicator);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
     function escapeHtml(text) {
       const d = document.createElement("div");
       d.textContent = text;
@@ -470,12 +642,36 @@
 
     async function sendMessage() {
       const text = chatInput.value.trim();
-      if (!text) return;
+      if (!text || isStreaming) return;
 
       chatInput.value = "";
       addMessage(text, "user");
-      showTyping(true);
 
+      // Complexity check — stream complex tasks
+      if (!isSimpleTask(text)) {
+        isStreaming = true;
+        showTyping(true);
+        showAgentCard("working", "Starting...", null);
+
+        try {
+          const resp = await window.mocaPanel.streamChat(text);
+          showTyping(false);
+          isStreaming = false;
+
+          if (resp && resp.reply) {
+            addMessage(resp.reply, "moca");
+          }
+        } catch (e) {
+          showTyping(false);
+          isStreaming = false;
+          removeAgentCard();
+          addMessage("Connection error", "moca");
+        }
+        return;
+      }
+
+      // Simple task — instant response
+      showTyping(true);
       try {
         const resp = await window.mocaPanel.sendChat(text);
         showTyping(false);
@@ -534,6 +730,41 @@
       if (data.reply) {
         addMessage(data.reply, "moca");
       }
+      // Open chat if not already
+      if (!chatOpen) {
+        openChat();
+      }
+    });
+
+    // Agent step updates — streaming narration
+    window.mocaPanel.onAgentStep((data) => {
+      // Update context card
+      showAgentCard("working", data.narration, `${data.step} of ~${data.total_steps || "?"}`);
+
+      // Add step message to chat
+      addStepMessage(data.step, data.narration);
+      showTyping(true);
+
+      // Open chat if not already
+      if (!chatOpen) {
+        openChat();
+      }
+    });
+
+    // Agent complete — final result
+    window.mocaPanel.onAgentComplete((data) => {
+      showTyping(false);
+      isStreaming = false;
+
+      // Update context card to done
+      const summary = data.reply ? data.reply.substring(0, 80) : "Done";
+      showAgentCard("done", summary, null);
+
+      // Show final reply
+      if (data.reply) {
+        addMessage(data.reply, "moca");
+      }
+
       // Open chat if not already
       if (!chatOpen) {
         openChat();

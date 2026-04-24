@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -8,9 +9,12 @@ import psutil
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel
 
+from agent import MOCAAgent, is_simple_task
+from executor import CodeExecutor
 from memory import MOCAMemory
 
 # Load .env from project root (one directory above server/)
@@ -21,6 +25,7 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.groq.com/openai/v1")
 AI_API_KEY = os.getenv("AI_API_KEY")
 AI_MODEL = os.getenv("AI_MODEL", "groq/compound-mini")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
+USER_ID = os.getenv("USER_ID", "boss")
 
 client = OpenAI(
     base_url=AI_BASE_URL,
@@ -52,6 +57,14 @@ You have a visual display channel. When a response would benefit from being seen
 
 When the user asks you to close the screen or display, include action: close_display in your response.
 
+You have the ability to write and run Python code on your server and search the web. Before writing new code always check your existing integrations — you may already have a tool for this. When you write code that solves a reusable problem, save it as an integration so you can use it again. Your toolkit grows permanently with every new capability you build.
+
+You are not limited to pre-defined tools. If you need a capability — write the code for it. You can install any Python package, call any API, fetch any data.
+
+For irreversible actions (deleting, sending, posting, paying) — tell the owner what you are about to do before doing it. One sentence. Then wait for confirmation.
+
+When you have image data from code execution, embed it in the display HTML as a base64 img tag.
+
 You MUST respond with valid JSON in this exact format:
 {"reply": "spoken text here", "display": null, "action": null}
 
@@ -67,6 +80,8 @@ When responding to messages from device mac_panel, keep responses concise — th
 
 app = FastAPI(title="MOCA Brain Server")
 moca_memory = MOCAMemory()
+executor = CodeExecutor()
+agent = MOCAAgent(client, AI_MODEL, moca_memory, USER_ID)
 
 conversation_history: list[dict] = []
 MAX_HISTORY = 40
@@ -104,8 +119,8 @@ class ChatRequest(BaseModel):
     device: str = "unknown"
 
 
-@app.post("/chat")
-async def chat(req: ChatRequest):
+def direct_response(req: ChatRequest) -> dict:
+    """Handle simple/direct responses without the agent loop."""
     log("CHAT", f"Device: {req.device} | Message: {req.message}")
     log("MODEL", f"Using: {AI_MODEL}")
 
@@ -204,6 +219,99 @@ async def chat(req: ChatRequest):
         if conversation_history and conversation_history[-1]["role"] == "user":
             conversation_history.pop()
         return {"reply": "Something went sideways, Boss. Give me a second and try again.", "device": req.device}
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    log("CHAT", f"Device: {req.device} | Message: {req.message}")
+
+    # Complexity check — route to agent for complex tasks
+    if not is_simple_task(req.message):
+        log("AGENT", f"Complex task detected — routing to agent")
+        result = agent.run(
+            task=req.message,
+            device=req.device,
+            system_prompt=SYSTEM_PROMPT,
+        )
+        if result is not None:
+            # Agent handled it
+            conversation_history.append({"role": "user", "content": req.message})
+            conversation_history.append({"role": "assistant", "content": result.get("reply", "")})
+            trim_history()
+            log("AGENT", f"Completed in {result.get('steps_taken', 0)} steps, {result.get('total_time', 0)}s")
+            return result
+
+    # Simple task — direct response
+    return direct_response(req)
+
+
+@app.post("/chat/stream")
+async def chat_stream(req: ChatRequest):
+    """SSE endpoint for streaming agent steps to the client."""
+
+    async def generate():
+        step_data_queue = asyncio.Queue()
+
+        def on_step(step_data):
+            # Put step data into the async queue
+            step_data_queue.put_nowait(step_data)
+
+        # Run agent in a thread to not block the event loop
+        loop = asyncio.get_event_loop()
+
+        async def run_agent():
+            result = await loop.run_in_executor(
+                None,
+                lambda: agent.run(
+                    task=req.message,
+                    device=req.device,
+                    system_prompt=SYSTEM_PROMPT,
+                    on_step=on_step,
+                ),
+            )
+            return result
+
+        # Start the agent task
+        agent_task = asyncio.create_task(run_agent())
+
+        # Stream step updates as they arrive
+        while not agent_task.done():
+            try:
+                step_data = await asyncio.wait_for(
+                    step_data_queue.get(), timeout=0.5
+                )
+                yield f"data: {json.dumps({'type': 'step', **step_data})}\n\n"
+            except asyncio.TimeoutError:
+                continue
+
+        # Drain any remaining steps
+        while not step_data_queue.empty():
+            step_data = step_data_queue.get_nowait()
+            yield f"data: {json.dumps({'type': 'step', **step_data})}\n\n"
+
+        # Get the final result
+        result = await agent_task
+
+        if result is None:
+            # Simple task — get direct response
+            result = direct_response(req)
+
+        # Update conversation history
+        conversation_history.append({"role": "user", "content": req.message})
+        conversation_history.append({"role": "assistant", "content": result.get("reply", "")})
+        trim_history()
+
+        yield f"data: {json.dumps({'type': 'complete', **result})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/health")

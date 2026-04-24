@@ -5,3 +5,11 @@ python-dotenv
 psutil
 sentence-transformers
 sqlalchemy
+requests
+yfinance
+pandas
+matplotlib
+pillow
+beautifulsoup4
+feedparser
+lxml

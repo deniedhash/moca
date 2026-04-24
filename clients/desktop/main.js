@@ -4,6 +4,22 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 
+// --- Complexity patterns (mirrors server/agent.py) ---
+const SIMPLE_PATTERNS = [
+  "what time", "reminder", "set a", "what's my",
+  "who am i", "what do you know", "hello", "hi",
+  "thanks", "thank you", "close", "open",
+  "how are you", "what are you",
+];
+
+function isSimpleTask(text) {
+  const lower = text.toLowerCase();
+  return (
+    SIMPLE_PATTERNS.some((p) => lower.includes(p)) ||
+    text.split(/\s+/).length <= 5
+  );
+}
+
 // Use venv python so listener/speaker have their dependencies
 const PYTHON = path.join(__dirname, ".venv", "bin", "python3");
 
@@ -428,6 +444,50 @@ ipcMain.on("panel-close", () => {
 
 ipcMain.handle("panel-chat", async (_event, message) => {
   log("PANEL-CHAT", message);
+
+  // Complexity check — stream complex tasks
+  if (!isSimpleTask(message)) {
+    log("PANEL-CHAT", "Complex task — streaming via agent");
+    try {
+      const response = await httpStreamRequest(
+        `${SERVER}/chat/stream`,
+        { message, device: "mac_panel" },
+        (stepData) => {
+          // Send each step to panel
+          if (panelWindow && !panelWindow.isDestroyed()) {
+            panelWindow.webContents.send("panel-agent-step", stepData);
+          }
+        }
+      );
+
+      if (response) {
+        // Handle display
+        if (response.display && response.display.windows) {
+          showDisplay(response.display);
+        }
+        if (response.action === "close_display") {
+          if (response.target) {
+            closeDisplayByTitle(response.target);
+          } else {
+            closeAllDisplayWindows();
+          }
+        }
+
+        // Send completion to panel
+        if (panelWindow && !panelWindow.isDestroyed()) {
+          panelWindow.webContents.send("panel-agent-complete", response);
+        }
+
+        return { reply: response.reply || "", agent_used: true, steps_taken: response.steps_taken };
+      }
+      return { reply: "No response from agent." };
+    } catch (err) {
+      log("ERROR", `Panel stream error: ${err.message}`);
+      return { reply: "Connection error." };
+    }
+  }
+
+  // Simple task — direct response
   try {
     const response = await httpRequest("POST", `${SERVER}/chat`, {
       message,
@@ -441,7 +501,7 @@ ipcMain.handle("panel-chat", async (_event, message) => {
         // Also send display info to panel
         if (panelWindow && !panelWindow.isDestroyed()) {
           panelWindow.webContents.send("panel-display-update", {
-            reply: null, // reply already returned to chat
+            reply: null,
             hasDisplay: true,
           });
         }
@@ -461,6 +521,44 @@ ipcMain.handle("panel-chat", async (_event, message) => {
     return { reply: "No response from server." };
   } catch (err) {
     log("ERROR", `Panel chat error: ${err.message}`);
+    return { reply: "Connection error." };
+  }
+});
+
+ipcMain.handle("panel-chat-stream", async (_event, message) => {
+  log("PANEL-CHAT-STREAM", message);
+  try {
+    const response = await httpStreamRequest(
+      `${SERVER}/chat/stream`,
+      { message, device: "mac_panel" },
+      (stepData) => {
+        if (panelWindow && !panelWindow.isDestroyed()) {
+          panelWindow.webContents.send("panel-agent-step", stepData);
+        }
+      }
+    );
+
+    if (response) {
+      if (response.display && response.display.windows) {
+        showDisplay(response.display);
+      }
+      if (response.action === "close_display") {
+        if (response.target) {
+          closeDisplayByTitle(response.target);
+        } else {
+          closeAllDisplayWindows();
+        }
+      }
+
+      if (panelWindow && !panelWindow.isDestroyed()) {
+        panelWindow.webContents.send("panel-agent-complete", response);
+      }
+
+      return { reply: response.reply || "", agent_used: true, steps_taken: response.steps_taken };
+    }
+    return { reply: "No response from agent." };
+  } catch (err) {
+    log("ERROR", `Panel stream error: ${err.message}`);
     return { reply: "Connection error." };
   }
 });
@@ -512,6 +610,81 @@ function httpRequest(method, urlStr, body) {
     });
 
     if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+/**
+ * SSE stream request — reads Server-Sent Events from /chat/stream.
+ * Calls onStep({step, narration}) for each step, returns final result.
+ */
+function httpStreamRequest(urlStr, body, onStep) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlStr);
+    const data = JSON.stringify(body);
+    const options = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(data),
+        Accept: "text/event-stream",
+      },
+      timeout: 120000,
+    };
+
+    const req = http.request(options, (res) => {
+      let buffer = "";
+
+      res.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // keep incomplete line
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+
+          try {
+            const payload = JSON.parse(trimmed.slice(6));
+
+            if (payload.type === "step" && onStep) {
+              onStep(payload);
+            } else if (payload.type === "complete") {
+              resolve(payload);
+            }
+          } catch (e) {
+            log("STREAM", `Parse error: ${e.message}`);
+          }
+        }
+      });
+
+      res.on("end", () => {
+        // Process any remaining buffer
+        if (buffer.trim().startsWith("data: ")) {
+          try {
+            const payload = JSON.parse(buffer.trim().slice(6));
+            if (payload.type === "complete") {
+              resolve(payload);
+              return;
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+        resolve(null);
+      });
+    });
+
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("stream timeout"));
+    });
+
+    req.write(data);
     req.end();
   });
 }
@@ -715,6 +888,66 @@ async function handleUtterance(text) {
   }
 
   try {
+    // Complexity check — stream complex tasks
+    if (!isSimpleTask(text)) {
+      log("VOICE", "Complex task — streaming via agent");
+
+      // Auto-open panel for streaming updates
+      if (!panelOpen) slideInPanel();
+
+      // Send user message to panel chat
+      if (panelWindow && !panelWindow.isDestroyed()) {
+        panelWindow.webContents.send("panel-display-update", {
+          userMessage: text,
+        });
+      }
+
+      const response = await httpStreamRequest(
+        `${SERVER}/chat/stream`,
+        { message: text, device: "mac_electron" },
+        (stepData) => {
+          // Send each step narration to panel
+          if (panelWindow && !panelWindow.isDestroyed()) {
+            panelWindow.webContents.send("panel-agent-step", stepData);
+          }
+          log("AGENT-STEP", `Step ${stepData.step}: ${stepData.narration}`);
+        }
+      );
+
+      if (response) {
+        // Handle display
+        if (response.display && response.display.windows) {
+          showDisplay(response.display);
+        }
+
+        if (response.action === "close_display") {
+          if (response.target) {
+            closeDisplayByTitle(response.target);
+          } else {
+            closeAllDisplayWindows();
+          }
+        }
+
+        // Send completion to panel
+        if (panelWindow && !panelWindow.isDestroyed()) {
+          panelWindow.webContents.send("panel-agent-complete", response);
+        }
+
+        // Speak final reply
+        if (response.reply) {
+          log("MOCA", response.reply);
+          try {
+            await speakAndWait(response.reply);
+          } catch (speakErr) {
+            log("ERROR", `Speaker error: ${speakErr.message}`);
+          }
+        }
+      }
+
+      return; // Early return — handled via streaming
+    }
+
+    // Simple task — direct response
     const response = await httpRequest("POST", `${SERVER}/chat`, {
       message: text,
       device: "mac_electron",
